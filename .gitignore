@@ -3,19 +3,27 @@
 .env.*
 !.env.example
 
-# Node / Next.js
+# Next.js / Node
 node_modules/
 .next/
 out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # Python
+__pycache__/
+*.py[cod]
 .venv/
 venv/
-__pycache__/
 .pytest_cache/
-*.pyc
 
 # IDE / OS
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Build / cache
+dist/
+build/
+coverage/
