@@ -1,294 +1,458 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import type { IncidentResult } from "@/lib/schema";
+import { redact, MAX_INPUT } from "@/lib/evidence";
+import { incidentBrief } from "@/lib/brief";
 
-type AnalysisResult = {
-  severity: string;
-  summary: string;
-  root_cause: string;
-  confidence: number;
-  recommended_actions: string[];
-};
-
-const demoIncident = `2026-09-19T02:02:14Z DEPLOY service=payment-api version=2.8.1 status=success
-2026-09-19T02:08:12Z WARN service=payment-api db_connections=86 max_connections=100
-2026-09-19T02:10:55Z WARN service=payment-api db_connections=94 max_connections=100
-2026-09-19T02:12:03Z ERROR service=payment-api error=ConnectionPoolTimeout timeout_seconds=30
-2026-09-19T02:12:18Z ERROR service=payment-api error=ConnectionPoolTimeout timeout_seconds=30
-2026-09-19T02:13:01Z ERROR service=payment-api event=payment_failed user=john@example.com
-2026-09-19T02:13:14Z CRITICAL service=payment-api error_rate=37 Authorization: Bearer super-secret-token`;
+function Citations({ ids }: { ids: string[] }) {
+  return (
+    <span className="citations">
+      {ids.map((id) => (
+        <a key={id} href={`#${id}`} aria-label={`View evidence ${id}`}>
+          {id}
+        </a>
+      ))}
+    </span>
+  );
+}
 
 export default function Home() {
   const [incident, setIncident] = useState("");
-  const [result, setResult] = useState<AnalysisResult | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<IncidentResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loadingFixture, setLoadingFixture] = useState(false);
+  const [exportContent, setExportContent] = useState("");
   const [error, setError] = useState("");
+  const [status, setStatus] = useState("Checking backend…");
+  const [synthetic, setSynthetic] = useState(false);
+  const [previewCounts, setPreviewCounts] = useState<Record<string, number>>(
+    {},
+  );
 
-  async function analyzeIncident() {
-    if (!incident.trim()) {
-      setError("Enter incident evidence before starting analysis.");
-      return;
-    }
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/status", { signal: controller.signal, cache: "no-store" })
+      .then((r) => r.json())
+      .then((data) => setStatus(data.status || "Backend status unavailable"))
+      .catch(() => {
+        if (!controller.signal.aborted) setStatus("Backend status unavailable");
+      });
+    return () => controller.abort();
+  }, []);
 
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-
-    if (!apiUrl) {
-      setError("NEXT_PUBLIC_API_URL is not configured.");
-      return;
-    }
-
-    setLoading(true);
+  function changeInput(raw: string, showSynthetic = false) {
+    setExportContent("");
+    const clean = redact(raw);
+    setIncident(showSynthetic ? raw : clean.text);
+    setPreviewCounts(clean.counts);
+    setSynthetic(showSynthetic);
+    setResult(null);
+    setError("");
+  }
+  async function loadFixture(name: string) {
+    setLoadingFixture(true);
+    setExportContent("");
+    setBusy(true);
     setError("");
     setResult(null);
-
     try {
-      const response = await fetch(apiUrl, {
+      const response = await fetch(`/api/fixtures/${name}`);
+      if (!response.ok) throw new Error("Unable to load fixture.");
+      const data = await response.json();
+      changeInput(data.incident, name === "redaction-test");
+    } catch {
+      setError("Unable to load fixture. Check the local server.");
+    } finally {
+      setLoadingFixture(false);
+      setBusy(false);
+    }
+  }
+  async function analyze() {
+    setExportContent("");
+    if (!incident.trim()) {
+      setError("Load a fixture or paste evidence first.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setResult(null);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await fetch("/api/analyze", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          incident,
-        }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ incident }),
+        signal: controller.signal,
       });
-
-      if (!response.ok) {
-        throw new Error(`AWS Lambda returned HTTP ${response.status}`);
-      }
-
-      const data: AnalysisResult = await response.json();
+      const data = await response.json();
+      if (!data.state)
+        throw new Error(
+          typeof data.error === "string"
+            ? data.error
+            : "No valid server response.",
+        );
       setResult(data);
-    } catch (err) {
+      if (data.backend.kind === "bedrock")
+        setStatus(
+          data.analysis
+            ? "Bedrock response verified · this run"
+            : "Bedrock · no validated response this run",
+        );
+      if (data.error) setError(data.error.message);
+      setIncident(redact(incident).text);
+      setSynthetic(false);
+    } catch (e) {
       setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to analyze the incident."
+        e instanceof Error && e.name !== "AbortError"
+          ? e.message
+          : "Request timed out. No analysis was accepted.",
       );
     } finally {
-      setLoading(false);
+      clearTimeout(timer);
+      setBusy(false);
     }
   }
-
-  function loadDemo() {
-    setIncident(demoIncident);
-    setResult(null);
-    setError("");
+  function download(format: "md" | "json") {
+    if (!result) return;
+    const content =
+      format === "md" ? incidentBrief(result) : JSON.stringify(result, null, 2);
+    setExportContent(content);
+    const url = URL.createObjectURL(
+      new Blob([content], {
+        type: format === "md" ? "text/markdown" : "application/json",
+      }),
+    );
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `resq-incident.${format}`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
+  const a = result?.analysis;
+  const redactions = Object.values(result?.redactionCounts ?? {}).reduce(
+    (x, y) => x + y,
+    0,
+  );
+  const previewRedactions = Object.values(previewCounts).reduce(
+    (x, y) => x + y,
+    0,
+  );
 
   return (
-    <main className="min-h-screen bg-[#070b12] text-slate-100">
-      <header className="border-b border-slate-800 bg-[#0b111b]">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
-          <div>
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-500 font-bold text-slate-950">
-                RQ
-              </div>
-
-              <div>
-                <h1 className="text-xl font-semibold tracking-tight">
-                  ResQ
-                </h1>
-                <p className="text-xs text-slate-400">
-                  Evidence-First AI Incident Commander
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-4 py-2 text-xs text-emerald-300">
-            <span className="h-2 w-2 rounded-full bg-emerald-400" />
-            AWS Backend Online
-          </div>
-        </div>
+    <main>
+      <header className="topbar">
+        <Link className="brand" href="/" aria-label="ResQ home">
+          <span className="mark">RQ</span>
+          <span>
+            ResQ<span className="brand-sub">INCIDENT INTELLIGENCE</span>
+          </span>
+        </Link>
+        <span className="status" role="status">
+          <span className="status-dot" />
+          {status}
+        </span>
       </header>
-
-      <div className="mx-auto max-w-7xl px-6 py-10">
-        <section className="mb-8">
-          <p className="mb-2 text-xs font-semibold uppercase tracking-[0.25em] text-cyan-400">
-            Incident Command Center
-          </p>
-
-          <h2 className="max-w-3xl text-4xl font-semibold tracking-tight">
-            Understand incidents.
-            <span className="text-slate-500"> Act with evidence.</span>
-          </h2>
-
-          <p className="mt-4 max-w-2xl text-sm leading-6 text-slate-400">
-            Submit production evidence for AI-assisted incident analysis.
-            ResQ sends the evidence to the AWS incident-analysis pipeline and
-            returns structured severity, root-cause analysis, confidence, and
-            recommended response actions.
-          </p>
-        </section>
-
-        <div className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr]">
-          <section className="rounded-2xl border border-slate-800 bg-[#0b111b] p-6 shadow-2xl">
-            <div className="mb-5 flex items-center justify-between">
-              <div>
-                <h3 className="font-semibold">Incident Evidence</h3>
-                <p className="mt-1 text-xs text-slate-500">
-                  Logs, alerts, deployment events, and observed symptoms
-                </p>
-              </div>
-
-              <button
-                onClick={loadDemo}
-                className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300 transition hover:border-cyan-500 hover:text-cyan-300"
-              >
-                Load demo incident
-              </button>
+      <section className="intro">
+        <p className="eyebrow">EVIDENCE FIRST. HUMAN REVIEW ALWAYS.</p>
+        <h1>
+          From scattered logs
+          <br />
+          to a <em>defensible next step.</em>
+        </h1>
+        <p>
+          Reconstruct the timeline. Inspect every citation. Know when the cause
+          is still unconfirmed.
+        </p>
+        <div className="intro-meta">
+          <span>01 / Load evidence</span>
+          <span>02 / Verify the hypothesis</span>
+          <span>03 / Export the brief</span>
+        </div>
+      </section>
+      <div className="workspace">
+        <section className="panel input-panel" aria-labelledby="evidence-title">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">INPUT / 01</p>
+              <h2 id="evidence-title">Incident evidence</h2>
             </div>
-
-            <textarea
-              value={incident}
-              onChange={(event) => setIncident(event.target.value)}
-              placeholder="Paste production incident evidence here..."
-              className="min-h-[390px] w-full resize-none rounded-xl border border-slate-800 bg-[#060a10] p-4 font-mono text-sm leading-6 text-slate-300 outline-none transition placeholder:text-slate-600 focus:border-cyan-500"
-            />
-
-            {error && (
-              <div className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-                {error}
-              </div>
-            )}
-
+            <span className="tag">Max 200 lines</span>
+          </div>
+          <p className="muted">
+            Start with a synthetic bundle, upload a text log, or paste your own.
+          </p>
+          <div className="fixture-buttons">
             <button
-              onClick={analyzeIncident}
-              disabled={loading}
-              className="mt-5 flex w-full items-center justify-center rounded-xl bg-cyan-400 px-5 py-3.5 font-semibold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={busy}
+              onClick={() => loadFixture("well-evidenced")}
             >
-              {loading ? "Analyzing with Amazon Bedrock..." : "Analyze Incident"}
+              Payment outage
             </button>
-
-            <div className="mt-4 flex flex-wrap gap-2 text-[11px] text-slate-500">
-              <span className="rounded-md bg-slate-900 px-2 py-1">
-                AWS Lambda
-              </span>
-              <span className="rounded-md bg-slate-900 px-2 py-1">
-                Amazon Bedrock
-              </span>
-              <span className="rounded-md bg-slate-900 px-2 py-1">
-                Evidence Grounded
-              </span>
+            <button disabled={busy} onClick={() => loadFixture("ambiguous")}>
+              Ambiguous incident
+            </button>
+            <button
+              disabled={busy}
+              onClick={() => loadFixture("redaction-test")}
+            >
+              Redaction test
+            </button>
+          </div>
+          <label className="upload">
+            Load .txt or .log file
+            <input
+              type="file"
+              accept=".txt,.log,text/plain"
+              disabled={busy}
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                if (file.size > MAX_INPUT) {
+                  setError("Upload a file smaller than 64 KB.");
+                  return;
+                }
+                try {
+                  changeInput(await file.text());
+                } catch {
+                  setError("Unable to read that file.");
+                }
+                e.target.value = "";
+              }}
+            />
+          </label>
+          {synthetic && (
+            <p className="notice">
+              Synthetic redaction test only. These example tokens are fake;
+              analysis will remove them.
+            </p>
+          )}
+          <label className="input-label" htmlFor="incident">
+            Evidence lines
+          </label>
+          <textarea
+            id="incident"
+            disabled={busy}
+            spellCheck={false}
+            maxLength={MAX_INPUT}
+            value={incident}
+            onChange={(e) => changeInput(e.target.value)}
+            placeholder="2026-09-19T02:12:03Z ERROR service=payment-api error=ConnectionPoolTimeout"
+          />
+          <div className="input-meta">
+            <span>{incident.length.toLocaleString()} / 64,000 characters</span>
+            <span>{previewRedactions} preview replacements</span>
+          </div>
+          <p className="privacy-note">
+            Known secret and personal-data patterns are redacted on paste and
+            again on the server. Review the preview: this is not comprehensive
+            PII detection.
+          </p>
+          <button
+            className="primary"
+            disabled={busy || !incident.trim()}
+            onClick={analyze}
+          >
+            {busy ? "Processing evidence…" : "Analyze incident"}
+            <span aria-hidden="true">↗</span>
+          </button>
+          {error && (
+            <p className="error" role="alert">
+              {error}
+            </p>
+          )}
+        </section>
+        <section
+          className="panel analysis-panel"
+          aria-labelledby="analysis-title"
+          aria-busy={busy}
+        >
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">REVIEW / 02</p>
+              <h2 id="analysis-title">Incident assessment</h2>
             </div>
-          </section>
-
-          <section className="rounded-2xl border border-slate-800 bg-[#0b111b] p-6 shadow-2xl">
-            {!result ? (
-              <div className="flex min-h-[530px] flex-col items-center justify-center text-center">
-                <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-slate-800 bg-slate-900 text-2xl">
-                  ◎
-                </div>
-
-                <h3 className="text-lg font-medium text-slate-300">
-                  Awaiting incident analysis
-                </h3>
-
-                <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">
-                  Add incident evidence or load the payment outage demo, then
-                  run the AWS-powered analysis.
+            {a && (
+              <span className={`severity ${a.severity}`}>{a.severity}</span>
+            )}
+          </div>
+          <div aria-live="polite">
+            {busy ? (
+              <div className="empty">
+                <div className="orb pulse">◎</div>
+                <h3>{loadingFixture ? "Loading the fixture" : "Processing the evidence"}</h3>
+                <p>
+                  {loadingFixture ? "Fetching a synthetic incident bundle from the local server." : "Redaction, timeline construction, inference and validation. The completed trace will appear below."}
                 </p>
+              </div>
+            ) : !result ? (
+              <div className="empty">
+                <div className="orb">◎</div>
+                <h3>Evidence before conclusions.</h3>
+                <p>
+                  Load the payment outage to inspect a supported failure
+                  mechanism. Try the ambiguous incident to see why ResQ
+                  withholds a cause.
+                </p>
+                <span className="tag">No analysis has run</span>
               </div>
             ) : (
-              <div>
-                <div className="mb-6 flex items-start justify-between gap-4">
-                  <div>
-                    <p className="text-xs uppercase tracking-widest text-slate-500">
-                      Incident Analysis
-                    </p>
-
-                    <h3 className="mt-2 text-2xl font-semibold">
-                      Production Incident
+              <>
+                <p
+                  className={`run-state ${result.state === "FAILED" ? "failed" : ""}`}
+                >
+                  {result.state.replaceAll("_", " ")}
+                </p>
+                <p className="backend-identity">
+                  {result.backend.kind === "demo"
+                    ? "DETERMINISTIC DEMO · No AWS calls"
+                    : "AMAZON BEDROCK"}
+                  <br />
+                  <code>{result.backend.model}</code>
+                </p>
+                {a ? (
+                  <>
+                    <div className="hypothesis">
+                      <p className="eyebrow">
+                        {a.rootCause.code === "unconfirmed"
+                          ? "CAUSE UNCONFIRMED"
+                          : "SUPPORTED FAILURE MECHANISM"}
+                      </p>
+                      <h3>{a.rootCause.statement}</h3>
+                      <Citations ids={a.rootCause.evidenceIds} />
+                      <p className="confidence">
+                        {a.confidence.level} confidence · qualitative support
+                      </p>
+                      <p className="muted">{a.confidence.qualification}</p>
+                    </div>
+                    <h3 className="subheading">
+                      Observed facts <span>verbatim evidence</span>
                     </h3>
-                  </div>
-
-                  <span className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm font-semibold text-red-300">
-                    {result.severity}
-                  </span>
-                </div>
-
-                <div className="mb-4 rounded-xl border border-slate-800 bg-[#070b12] p-4">
-                  <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
-                    Summary
-                  </p>
-                  <p className="text-sm leading-6 text-slate-300">
-                    {result.summary}
-                  </p>
-                </div>
-
-                <div className="mb-4 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4">
-                  <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-cyan-400">
-                    Probable Root Cause
-                  </p>
-                  <p className="text-sm leading-6 text-slate-300">
-                    {result.root_cause}
-                  </p>
-                </div>
-
-                <div className="mb-4 rounded-xl border border-slate-800 bg-[#070b12] p-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                      Model Confidence
+                    <ul className="facts">
+                      {a.observedFacts.map((fact, i) => (
+                        <li key={i}>
+                          <Citations ids={fact.evidenceIds} />
+                          <code>{fact.statement}</code>
+                        </li>
+                      ))}
+                    </ul>
+                    <details open>
+                      <summary>Alternative hypotheses · unverified</summary>
+                      {a.alternativeHypotheses.map((h, i) => (
+                        <div className="alternative" key={i}>
+                          <p>{h.hypothesis}</p>
+                          <Citations ids={h.evidenceIds} />
+                          <p className="muted">Next check: {h.nextCheck}</p>
+                        </div>
+                      ))}
+                    </details>
+                    <h3 className="subheading">Recommended next checks</h3>
+                    <ol>
+                      {a.recommendedNextChecks.map((x) => (
+                        <li key={x}>{x}</li>
+                      ))}
+                    </ol>
+                    <h3 className="subheading">Suggested mitigations</h3>
+                    <ul>
+                      {a.suggestedMitigations.map((x) => (
+                        <li key={x}>{x}</li>
+                      ))}
+                    </ul>
+                    <p className="notice">
+                      Human approval required. ResQ does not execute
+                      remediation.
                     </p>
-                    <span className="text-sm font-semibold text-cyan-300">
-                      {Math.round(result.confidence * 100)}%
-                    </span>
+                    <details>
+                      <summary>Limitations &amp; evidence policy</summary>
+                      <ul>
+                        {a.limitations.map((x) => (
+                          <li key={x}>{x}</li>
+                        ))}
+                      </ul>
+                      <p>
+                        Severity reflects structured log levels, not
+                        independently measured business impact.
+                      </p>
+                    </details>
+                  </>
+                ) : (
+                  <div className="notice">
+                    <h3>
+                      {result.state === "FAILED"
+                        ? "No answer accepted"
+                        : "Cause unconfirmed"}
+                    </h3>
+                    <p>
+                      {result.error?.message ??
+                        "Add time-correlated service metrics and error logs to continue."}
+                    </p>
                   </div>
-
-                  <div className="h-2 overflow-hidden rounded-full bg-slate-800">
-                    <div
-                      className="h-full rounded-full bg-cyan-400"
-                      style={{
-                        width: `${Math.min(
-                          100,
-                          Math.max(0, result.confidence * 100)
-                        )}%`,
-                      }}
-                    />
-                  </div>
-
-                  <p className="mt-2 text-[11px] text-slate-600">
-                    Model-generated confidence; not a calibrated probability.
+                )}
+                {result.warnings.map((w) => (
+                  <p className="notice" key={w}>
+                    {w}
                   </p>
-                </div>
-
-                <div className="rounded-xl border border-slate-800 bg-[#070b12] p-4">
-                  <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-500">
-                    Recommended Actions
-                  </p>
-
-                  <div className="space-y-3">
-                    {result.recommended_actions?.map((action, index) => (
-                      <div
-                        key={`${action}-${index}`}
-                        className="flex gap-3 rounded-lg border border-slate-800 bg-slate-900/50 p-3"
-                      >
-                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-cyan-500/10 text-xs font-semibold text-cyan-300">
-                          {index + 1}
-                        </span>
-
-                        <p className="text-sm leading-6 text-slate-300">
-                          {action}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="mt-5 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3 text-xs leading-5 text-amber-200/80">
-                  Human approval required before executing remediation actions.
-                </div>
-              </div>
+                ))}
+              </>
             )}
-          </section>
-        </div>
-
-        <footer className="mt-8 flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 pt-5 text-xs text-slate-600">
-          <span>ResQ · Evidence-First Incident Response</span>
-          <span>AWS Lambda → Amazon Bedrock</span>
-        </footer>
+          </div>
+        </section>
       </div>
+      {result && (
+        <section
+          className="panel timeline-panel"
+          aria-labelledby="timeline-title"
+        >
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">TRACE / 03</p>
+              <h2 id="timeline-title">Evidence timeline</h2>
+              <p className="muted">
+                {result.evidence.length} lines · {redactions} server
+                replacements · IDs map to original line numbers within this
+                bundle
+              </p>
+            </div>
+            <div className="export">
+              <button onClick={() => download("md")}>Export brief .md</button>
+              <button onClick={() => download("json")}>
+                Export trace .json
+              </button>
+            </div>
+          </div>
+          {exportContent && <div className="export-preview"><label className="input-label" htmlFor="export-content">Export content — copy this if your browser blocks the download</label><textarea id="export-content" readOnly value={exportContent} /></div>}
+          <ol className="trace">
+            {result.trace.map((step) => (
+              <li key={step.state}>
+                <strong>{step.state}</strong>
+                <time>{step.at}</time>
+              </li>
+            ))}
+          </ol>
+          <div className="timeline">
+            {result.evidence.map((e) => (
+              <article id={e.id} key={e.id} tabIndex={-1}>
+                <div>
+                  <a href={`#${e.id}`} className="evidence-id">
+                    {e.id}
+                  </a>
+                  <span>Original line {e.lineNumber}</span>
+                  <time>{e.timestamp ?? "Timestamp unavailable"}</time>
+                </div>
+                <pre>{e.text}</pre>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+      <footer>
+        <span>ResQ / Evidence-first AI incident analyst</span>
+        <span>Redact → reconstruct → analyze → verify → review</span>
+      </footer>
     </main>
   );
 }

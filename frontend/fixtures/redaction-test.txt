@@ -1,0 +1,3 @@
+2026-09-19T02:13:01Z ERROR service=payment-api user=judge@example.com ip=192.0.2.44
+2026-09-19T02:13:14Z ERROR service=payment-api Authorization: Bearer SYNTHETIC-DEMO-TOKEN
+2026-09-19T02:13:15Z INFO service=payment-api api_key=FAKE-KEY-FOR-REDACTION password="FAKE PASSWORD" phone=+1-202-555-0142

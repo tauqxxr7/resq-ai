@@ -27,3 +27,4 @@ Thumbs.db
 dist/
 build/
 coverage/
+docs/local-validation/

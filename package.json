@@ -1,0 +1,14 @@
+{
+  "name": "resq-ai",
+  "private": true,
+  "scripts": {
+    "demo": "node scripts/demo.mjs",
+    "test": "npm --prefix frontend test",
+    "lint": "npm --prefix frontend run lint",
+    "typecheck": "npm --prefix frontend run typecheck",
+    "build": "npm --prefix frontend run build",
+    "samples": "npm --prefix frontend run samples",
+    "verify:bedrock": "node scripts/verify-bedrock.mjs"
+  },
+  "engines": { "node": ">=22.18.0" }
+}

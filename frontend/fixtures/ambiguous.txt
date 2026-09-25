@@ -1,0 +1,4 @@
+2026-09-19T02:02:14Z DEPLOY service=payment-api version=2.8.1 status=success
+2026-09-19T02:12:03Z ERROR service=payment-api error=RequestTimeout timeout_seconds=30
+2026-09-19T02:13:14Z WARN service=payment-api latency_p95_ms=2400
+2026-09-19T02:14:00Z INFO service=payment-api event=investigation_started
